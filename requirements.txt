@@ -3,3 +3,6 @@ pandas
 plotly
 sqlalchemy
 python-dateutil
+re
+datetime
+dateutil.relativedelta
