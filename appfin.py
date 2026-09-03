@@ -167,6 +167,37 @@ def init_categories(db):
             db.add(Category(name=name, type=c_type))
     db.commit()
 
+
+def calcular_data_vencimento_fatura(card, data_ref):
+    if data_ref is None:
+        return datetime.date.today()
+
+    dia_fechamento = card.due_day - card.closing_days_before
+    if dia_fechamento <= 0:
+        dia_fechamento += 30
+
+    if data_ref.day >= dia_fechamento:
+        return data_ref + dateutil.relativedelta.relativedelta(months=1)
+    return data_ref
+
+
+def aplicar_pagamento_fatura(fatura_items, valor_pagamento):
+    valor_restante = float(valor_pagamento)
+    itens_pagos = []
+
+    for item in sorted(fatura_items, key=lambda t: (t.date or t.purchase_date or datetime.date.min, t.id)):
+        if valor_restante <= 0:
+            break
+
+        if float(item.amount) <= valor_restante:
+            item.is_paid = True
+            valor_restante -= float(item.amount)
+            itens_pagos.append(item)
+        else:
+            break
+
+    return valor_restante, itens_pagos
+
 # ---------------------------------------------------------
 # 2. CONFIGURAÇÃO E ESTILIZAÇÃO
 # ---------------------------------------------------------
@@ -584,19 +615,12 @@ with tab_dashboard:
     total_faturas_mes = 0.0
 
     for c in user_cards:
-        dia_fechamento = c.due_day - c.closing_days_before
-        if dia_fechamento <= 0:
-            dia_fechamento += 30
-            
         trans_card = [t for t in all_transactions if t.card_id == c.id and not t.is_paid]
-        
+
         for t in trans_card:
             ref_date = t.date or t.purchase_date
-            if ref_date.day >= dia_fechamento:
-                venc = ref_date + dateutil.relativedelta.relativedelta(months=1)
-            else:
-                venc = ref_date
-                
+            venc = calcular_data_vencimento_fatura(c, ref_date)
+
             if venc.month == hoje.month and venc.year == hoje.year:
                 total_faturas_mes += t.amount
 
@@ -851,15 +875,12 @@ with tab_faturas:
             Transaction.card_id == sel_card.id,
             Transaction.is_paid == False
         ).all()
-        
+
         fatura_items = []
 
         for t in trans_card:
             ref_date = t.date or t.purchase_date
-            if ref_date.day >= dia_fechamento:
-                data_vencimento_fatura = ref_date + dateutil.relativedelta.relativedelta(months=1)
-            else:
-                data_vencimento_fatura = ref_date
+            data_vencimento_fatura = calcular_data_vencimento_fatura(sel_card, ref_date)
 
             if data_vencimento_fatura.month == mes_venc_num and data_vencimento_fatura.year == ano_venc_num:
                 fatura_items.append(t)
@@ -883,19 +904,27 @@ with tab_faturas:
                     acc_pay_dict = {a.bank_name: a.id for a in user_accounts}
                     
                     sel_acc_pay_name = cp1.selectbox("Conta Origem:", list(acc_pay_dict.keys()))
-                    valor_pagamento = cp2.number_input("Valor Pagar (R$):", value=float(total_fatura), min_value=0.01, step=10.0)
+                    valor_pagamento = cp2.number_input(
+                        "Valor Pagar (R$):",
+                        value=float(total_fatura),
+                        min_value=0.01,
+                        max_value=float(total_fatura),
+                        step=10.0
+                    )
                     data_pagamento = cp3.date_input("Data Pagamento:", value=st.session_state.ultima_data_lancamento)
                     metodo_pagamento = cp4.selectbox("Forma:", ["PIX", "Débito Automático", "Boleto / TED"])
-                    
+
                     btn_pagar = st.form_submit_button("Confirmar Pagamento")
-                    
+
                     if btn_pagar:
                         acc_pay_id = acc_pay_dict[sel_acc_pay_name]
                         desc_pagto = f"Pagamento Fatura {sel_card.card_name} ({mes_sel}/{ano_venc_num})"
-                        
-                        for item in fatura_items:
-                            item.is_paid = True
-                        
+
+                        saldo_restante, itens_pagos = aplicar_pagamento_fatura(fatura_items, valor_pagamento)
+
+                        if saldo_restante > 0:
+                            st.warning(f"Pagamento parcial aplicado. Restou R$ {saldo_restante:,.2f} da fatura sem quitação.")
+
                         nova_trans_pagto = Transaction(
                             user_id=current_user.id,
                             account_id=acc_pay_id,
@@ -911,7 +940,7 @@ with tab_faturas:
                         db.add(nova_trans_pagto)
                         db.commit()
                         st.session_state.ultima_data_lancamento = data_pagamento
-                        st.success("Pagamento efetuado com sucesso!")
+                        st.success(f"Pagamento efetuado com sucesso! {len(itens_pagos)} item(ns) marcado(s) como pago(s).")
                         st.rerun()
 
         st.markdown("#### Lançamentos pendentes na Fatura")
